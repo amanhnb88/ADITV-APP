@@ -7,7 +7,7 @@
     "icon": "./assets/icon2.png",
     "scheme": "aditvapp",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
       "supportsTablet": true
     },
@@ -35,9 +35,6 @@
       ],
       "expo-video",
       "react-native-video"
-    ],
-    "experiments": {
-      "reactCompiler": true
-    }
+    ]
   }
 }
