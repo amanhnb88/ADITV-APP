@@ -39,7 +39,8 @@
           }
         }
       ],
-      "expo-video"
+      "expo-video",
+      "react-native-video"
     ],
     "experiments": {
       "typedRoutes": true,

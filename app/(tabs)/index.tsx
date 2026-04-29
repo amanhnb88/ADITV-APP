@@ -1,98 +1,257 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { 
+  View, Text, StyleSheet, Platform, TouchableOpacity, 
+  ActivityIndicator 
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { FlashList } from '@shopify/flash-list';
+import { create } from 'zustand';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+// ==========================================
+// 1. TEMA & WARNA (Gaya HBO/Netflix Dark Mode)
+// ==========================================
+const theme = {
+  colors: {
+    bg: '#0A0A0A',
+    surface: '#141414',
+    surface2: '#1A1A1A',
+    accent: '#3b82f6', // Aksen biru sesuai dokumen
+    text: '#FFFFFF',
+    textMuted: '#999999',
+    border: '#1e2d45',
+    tvFocus: '#FFFFFF',
+  }
+};
 
-export default function HomeScreen() {
+// ==========================================
+// 2. STATE MANAGEMENT (Zustand)
+// ==========================================
+const useStore = create((set) => ({
+  channels: [],
+  activeChannel: null,
+  isLoading: false,
+  error: null,
+  setChannels: (channels) => set({ channels }),
+  setActiveChannel: (channel) => set({ activeChannel: channel }),
+  setLoading: (isLoading) => set({ isLoading }),
+}));
+
+// ==========================================
+// 3. DETEKSI PERANGKAT (TV vs HP)
+// ==========================================
+function useDeviceType() {
+  const isTV = Platform.isTV;
+  return { isTV };
+}
+
+// ==========================================
+// 4. PARSER M3U (Anti-Freeze Chunking)
+// ==========================================
+const CHUNK_SIZE = 200;
+
+async function parseM3UChunked(raw) {
+  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const results = [];
+  
+  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
+    const chunk = lines.slice(i, i + CHUNK_SIZE);
+    await new Promise(resolve => setTimeout(resolve, 0)); // Jeda agar UI tidak macet
+    
+    let currentChannel = {};
+    chunk.forEach(line => {
+      if (line.startsWith('#EXTINF')) {
+        const nameMatch = line.match(/,(.+)$/);
+        currentChannel.name = nameMatch ? nameMatch[1].trim() : 'Channel Tidak Diketahui';
+        currentChannel.id = Math.random().toString(36).substr(2, 9);
+      } else if (line.startsWith('http')) {
+        currentChannel.url = line;
+        if (currentChannel.name) {
+          results.push({ ...currentChannel });
+          currentChannel = {}; 
+        }
+      }
+    });
+  }
+  return results;
+}
+
+// ==========================================
+// 5. KOMPONEN UI UTAMA
+// ==========================================
+
+// Item Channel untuk List
+const ChannelItem = React.memo(({ item, onPress, isTV, isActive }) => {
+  const [isFocused, setIsFocused] = useState(false);
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+    <TouchableOpacity
+      activeOpacity={0.8}
+      onPress={onPress}
+      onFocus={() => setIsFocused(true)}
+      onBlur={() => setIsFocused(false)}
+      style={[
+        styles.channelCard,
+        isTV && isFocused && styles.channelCardFocused,
+        isActive && styles.channelCardActive
+      ]}
+    >
+      <Text style={[styles.channelName, isActive && styles.textActive]} numberOfLines={1}>
+        {item.name}
+      </Text>
+    </TouchableOpacity>
+  );
+});
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+// Komponen Player Video
+const PlayerEngine = ({ channel }) => {
+  const player = useVideoPlayer(channel?.url || '', (player) => {
+    player.loop = false;
+    player.play();
+  });
+
+  if (!channel) {
+    return (
+      <View style={styles.playerPlaceholder}>
+        <Text style={styles.textMuted}>Pilih channel untuk memutar siaran</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.playerContainer}>
+      <VideoView
+        style={styles.videoView}
+        player={player}
+        allowsFullscreen
+        allowsPictureInPicture
+      />
+      <View style={styles.playerOverlay}>
+        <Text style={styles.nowPlaying}>📺 Memutar: {channel.name}</Text>
+      </View>
+    </View>
+  );
+};
+
+// ==========================================
+// 6. LAYOUT UTAMA APLIKASI
+// ==========================================
+export default function App() {
+  const { channels, activeChannel, isLoading, setChannels, setActiveChannel, setLoading } = useStore();
+  const { isTV } = useDeviceType();
+
+  // Memuat data M3U dummy saat aplikasi pertama dibuka
+  useEffect(() => {
+    const fetchDummyPlaylist = async () => {
+      setLoading(true);
+      try {
+        // Dummy data M3U (Nanti diganti dengan fetch dari URL aslimu)
+        const dummyM3U = `
+#EXTM3U
+#EXTINF:-1 tvg-id="1" tvg-name="TVRI",TVRI Nasional
+https://m3u8.dummy-stream.com/tvri.m3u8
+#EXTINF:-1 tvg-id="2" tvg-name="MetroTV",Metro TV
+https://m3u8.dummy-stream.com/metro.m3u8
+#EXTINF:-1 tvg-id="3" tvg-name="Kompas",Kompas TV
+https://m3u8.dummy-stream.com/kompas.m3u8
+#EXTINF:-1 tvg-id="4" tvg-name="Trans7",Trans 7
+https://m3u8.dummy-stream.com/trans7.m3u8
+        `.trim();
+
+        const parsedChannels = await parseM3UChunked(dummyM3U);
+        setChannels(parsedChannels);
+      } catch (error) {
+        console.error("Gagal parsing playlist:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchDummyPlaylist();
+  }, []);
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      
+      {/* Header Aplikasi */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>ADITV</Text>
+        <Text style={styles.deviceInfo}>{isTV ? 'Mode TV 📺' : 'Mode HP 📱'}</Text>
+      </View>
+
+      <View style={[styles.mainLayout, isTV && styles.tvLayout]}>
+        
+        {/* Area Pemutar Video */}
+        <View style={isTV ? styles.tvPlayerWrapper : styles.mobilePlayerWrapper}>
+          <PlayerEngine channel={activeChannel} />
+        </View>
+
+        {/* Area Daftar Channel (FlashList) */}
+        <View style={styles.listContainer}>
+          {isLoading ? (
+            <ActivityIndicator size="large" color={theme.colors.accent} style={{ marginTop: 20 }} />
+          ) : (
+            <FlashList
+              data={channels}
+              renderItem={({ item }) => (
+                <ChannelItem 
+                  item={item} 
+                  isTV={isTV}
+                  isActive={activeChannel?.id === item.id}
+                  onPress={() => setActiveChannel(item)} 
+                />
+              )}
+              estimatedItemSize={72}
+              keyExtractor={(item) => item.id}
+              numColumns={isTV ? 3 : 1} // 3 Kolom untuk TV, 1 Kolom untuk HP
+            />
+          )}
+        </View>
+        
+      </View>
+    </SafeAreaView>
   );
 }
 
+// ==========================================
+// 7. STYLESHEET (Desain)
+// ==========================================
 const styles = StyleSheet.create({
-  titleContainer: {
+  container: { flex: 1, backgroundColor: theme.colors.bg },
+  header: {
+    padding: 16,
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.border,
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  headerTitle: { color: theme.colors.accent, fontSize: 22, fontWeight: 'bold' },
+  deviceInfo: { color: theme.colors.textMuted, fontSize: 12 },
+  mainLayout: { flex: 1, flexDirection: 'column' },
+  tvLayout: { flexDirection: 'row' },
+  mobilePlayerWrapper: { height: 250, backgroundColor: theme.colors.surface },
+  tvPlayerWrapper: { flex: 2, backgroundColor: theme.colors.surface, borderRightWidth: 1, borderRightColor: theme.colors.border },
+  listContainer: { flex: 1, paddingHorizontal: 12, paddingTop: 12 },
+  playerPlaceholder: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  playerContainer: { flex: 1 },
+  videoView: { flex: 1 },
+  playerOverlay: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 10, backgroundColor: 'rgba(0,0,0,0.6)' },
+  nowPlaying: { color: theme.colors.text, fontSize: 13, fontWeight: '600' },
+  channelCard: {
+    padding: 16,
+    marginVertical: 6,
+    marginHorizontal: 4,
+    backgroundColor: theme.colors.surface2,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    minHeight: 60,
+    justifyContent: 'center',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
-  },
+  channelCardFocused: { borderColor: theme.colors.tvFocus, transform: [{ scale: 1.05 }] },
+  channelCardActive: { borderColor: theme.colors.accent, backgroundColor: '#1e2d45' },
+  channelName: { color: theme.colors.text, fontSize: 15, fontWeight: '500' },
+  textActive: { color: theme.colors.accent },
+  textMuted: { color: theme.colors.textMuted }
 });
