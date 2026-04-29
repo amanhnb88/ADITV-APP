@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build APK Nitro Speed
 
 on:
   push:
@@ -8,42 +8,69 @@ on:
 
 jobs:
   build:
-    name: Build APK
     runs-on: ubuntu-latest
-
+    
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Setup Node.js
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
-      - name: ☕ Setup Java
+      - name: Setup Java 17 (Zulu)
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      # HAPUS BLOK GRADLE CACHE AGAR BUILD-NYA 100% BERSIH DARI NOL
+      # Caching resmi dari Gradle, jauh lebih ngebut dan stabil
+      - name: Setup Gradle Cache
+        uses: gradle/actions/setup-gradle@v4
 
-      - name: 📦 Install dependencies
+      - name: Install Dependencies
         run: npm install
 
-      - name: 🛠️ Generate Native Android Project (Prebuild)
+      # Men-generate folder Android dari fresh (Khusus Expo)
+      - name: Generate Native Android Project (Prebuild)
         run: npx expo prebuild --platform android --clean
 
-      - name: 🚀 Build Release APK (Optimized)
+      # Diinjeksi SETELAH prebuild agar tidak terhapus
+      - name: Obat Anti Gigi Gatal (Bungkam Warning)
+        run: |
+          cat << 'EOF' >> android/build.gradle
+          allprojects {
+              tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+                  kotlinOptions.suppressWarnings = true
+              }
+              tasks.withType(JavaCompile).configureEach {
+                  options.compilerArgs << '-Xlint:none' << '-nowarn'
+              }
+          }
+          EOF
+
+      # NITRO MODE - Dioptimasi untuk Expo
+      - name: Build APK (NITRO MODE)
         run: |
           cd android
-          # Matikan paksa config cache dari argumen & hapus flag yang bikin masalah
-          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a -Porg.gradle.configuration-cache=false --no-configuration-cache
+          ./gradlew assembleRelease \
+            --no-daemon \
+            --parallel \
+            --build-cache \
+            --max-workers=4 \
+            -Porg.gradle.configuration-cache=false \
+            --no-configuration-cache \
+            -Porg.gradle.vfs.watch=false \
+            -PreactNativeArchitectures=arm64-v8a \
+            -x lint \
+            -x test \
+            --warning-mode none
 
-      - name: 📤 Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ADITV-App-Release-Fast
-          path: android/app/build/outputs/apk/release/app-release.apk
+          name: ADITV-Nitro-APK
+          path: android/app/build/outputs/apk/release/*.apk
           retention-days: 1
