@@ -1,14 +1,15 @@
 import React, { useState } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, 
-  ActivityIndicator, ScrollView, TextInput 
+  ActivityIndicator, ScrollView 
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
+import { useVideoPlayer, VideoView } from 'expo-video'; // 👈 KITA PANGGIL LAGI EXPO-VIDEO
 import Video from 'react-native-video';
 import { create } from 'zustand';
 
 // ==========================================
-// 1. DATA CHANNEL AKTIF (HASIL SCAN PYTHON)
+// 1. DATA CHANNEL AKTIF 
 // ==========================================
 const ACTIVE_CHANNELS = [
   {
@@ -35,7 +36,7 @@ const ACTIVE_CHANNELS = [
 ];
 
 // ==========================================
-// 2. LOGGER & STATE
+// 2. LOGGER
 // ==========================================
 const useLogStore = create((set) => ({
   logs: [],
@@ -46,12 +47,22 @@ const useLogStore = create((set) => ({
 }));
 
 // ==========================================
-// 3. CUSTOM UI PLAYER (NO BIG PLAY BUTTON)
+// 3. MESIN DUAL PLAYER + CUSTOM UI
 // ==========================================
-const CustomPlayer = ({ channel }) => {
+const CustomDualPlayer = ({ channel }) => {
   const { addLog } = useLogStore();
   const [isBuffering, setIsBuffering] = useState(true);
   const [showUI, setShowUI] = useState(false);
+
+  // MESIN 1: EXPO-VIDEO (KHUSUS NON-DRM SEPERTI RCTI)
+  const expoSource = channel && !channel.drm ? { uri: channel.url, headers: channel.headers } : null;
+  const player = useVideoPlayer(expoSource, (p) => {
+    p.loop = false;
+    if (channel && !channel.drm) {
+      addLog(`Membuka Jalur: ${channel.name}`, 'EXPO-PLAYER');
+      p.play();
+    }
+  });
 
   if (!channel) return (
     <View style={styles.placeholder}><Text style={styles.textMuted}>Pilih Channel VIP di Bawah 📺</Text></View>
@@ -59,32 +70,66 @@ const CustomPlayer = ({ channel }) => {
 
   const handleTouch = () => {
     setShowUI(true);
-    setTimeout(() => setShowUI(false), 3000);
+    setTimeout(() => setShowUI(false), 3000); // UI Hilang otomatis dlm 3 detik
+  };
+
+  const renderVideoEngine = () => {
+    // MESIN 2: REACT-NATIVE-VIDEO (KHUSUS DRM / HBO)
+    if (channel.drm) {
+      return (
+        <Video 
+          source={{ 
+            uri: channel.url, 
+            headers: channel.headers,
+            type: channel.url.includes('.mpd') ? 'mpd' : 'm3u8' // Paksa deteksi format
+          }} 
+          style={styles.video}
+          controls={false} // Matikan UI Bawaan
+          paused={false} // INI KUNCI AGAR LANGSUNG JALAN
+          resizeMode="contain"
+          drm={{
+            type: channel.drm.type,
+            licenseServer: channel.drm.licenseServer,
+            headers: channel.headers // Suntik UA ke server DRM
+          }}
+          bufferConfig={{ minBufferMs: 15000, maxBufferMs: 50000, bufferForPlaybackMs: 2500 }}
+          onLoad={() => { setIsBuffering(false); addLog(`DRM Terbuka: ${channel.name}`, 'SUCCESS'); }}
+          onBuffer={({ isBuffering }) => setIsBuffering(isBuffering)}
+          onError={(e) => { setIsBuffering(false); addLog(`DRM Error: ${JSON.stringify(e)}`, 'ERROR'); }}
+        />
+      );
+    }
+
+    // Panggil Mesin 1 (Expo-Video)
+    return (
+      <VideoView 
+        style={styles.video} 
+        player={player} 
+        nativeControls={false} // Matikan UI Bawaan
+        contentFit="contain" 
+      />
+    );
   };
 
   return (
     <View style={styles.videoWrapper}>
-      <Video 
-        source={{ uri: channel.url, headers: channel.headers }} 
-        style={styles.video}
-        controls={false} // HILANGKAN TOMBOL PLAY SISTEM
-        autoplay={true}
-        resizeMode="contain"
-        drm={channel.drm ? { ...channel.drm, headers: channel.headers } : undefined}
-        bufferConfig={{ minBufferMs: 15000, maxBufferMs: 50000, bufferForPlaybackMs: 2500 }}
-        onLoad={() => { setIsBuffering(false); addLog(`Playing: ${channel.name}`, 'SUCCESS'); }}
-        onBuffer={({ isBuffering }) => setIsBuffering(isBuffering)}
-        onError={(e) => { setIsBuffering(false); addLog(`Error: ${JSON.stringify(e)}`, 'ERROR'); }}
-      />
+      {/* RENDER VIDEO */}
+      {renderVideoEngine()}
 
-      {isBuffering && <View style={styles.loadingOverlay}><ActivityIndicator size="large" color="#3b82f6" /></View>}
+      {/* INDIKATOR LOADING PINTAR (Hanya untuk DRM) */}
+      {channel.drm && isBuffering && (
+        <View style={styles.loadingOverlay} pointerEvents="none">
+          <ActivityIndicator size="large" color="#3b82f6" />
+        </View>
+      )}
 
+      {/* OVERLAY SENTUH & CUSTOM UI */}
       <TouchableOpacity style={styles.touchArea} activeOpacity={1} onPress={handleTouch}>
         {showUI && (
           <View style={styles.topBar}>
             <Text style={styles.liveBadge}>● LIVE</Text>
             <Text style={styles.channelTitle}>{channel.name}</Text>
-            <TouchableOpacity style={styles.gearButton} onPress={() => alert("Settings Open")}>
+            <TouchableOpacity style={styles.gearButton} onPress={() => alert("Pengaturan Resolusi & Subtitle")}>
               <Text style={{fontSize: 18}}>⚙️</Text>
             </TouchableOpacity>
           </View>
@@ -107,7 +152,7 @@ export default function App() {
         <View style={styles.header}><Text style={styles.title}>ADITV PRO VIP</Text></View>
 
         <View style={styles.playerSection}>
-          <CustomPlayer channel={activeChannel} />
+          <CustomDualPlayer channel={activeChannel} />
         </View>
 
         <View style={styles.listSection}>
@@ -144,14 +189,14 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050505' },
   header: { padding: 15, borderBottomWidth: 1, borderBottomColor: '#1e2d45', alignItems: 'center' },
   title: { color: '#3b82f6', fontSize: 20, fontWeight: 'bold', letterSpacing: 2 },
-  playerSection: { height: 250, backgroundColor: '#000' },
+  playerSection: { height: 250, backgroundColor: '#000', borderWidth: 1, borderColor: '#1e2d45' },
   videoWrapper: { flex: 1, position: 'relative' },
-  video: { flex: 1, width: '100%' },
+  video: { flex: 1, width: '100%', height: '100%', backgroundColor: '#000' },
   loadingOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   touchArea: { ...StyleSheet.absoluteFillObject },
-  topBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', padding: 10 },
-  liveBadge: { backgroundColor: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 'bold', padding: 3, borderRadius: 3, marginRight: 10 },
-  channelTitle: { color: '#fff', fontSize: 14, flex: 1 },
+  topBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.7)', padding: 10 },
+  liveBadge: { backgroundColor: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 'bold', paddingVertical: 2, paddingHorizontal: 6, borderRadius: 4, marginRight: 10 },
+  channelTitle: { color: '#fff', fontSize: 14, flex: 1, fontWeight: 'bold' },
   gearButton: { padding: 5 },
   listSection: { flex: 1, padding: 20 },
   sectionTitle: { color: '#64748b', marginBottom: 15, fontSize: 12, fontWeight: 'bold' },
@@ -165,5 +210,5 @@ const styles = StyleSheet.create({
   logTitle: { color: '#3b82f6', fontSize: 10, fontWeight: 'bold' },
   logText: { color: '#10b981', fontSize: 9, fontFamily: 'monospace' },
   placeholder: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  textMuted: { color: '#444' }
+  textMuted: { color: '#666' }
 });
