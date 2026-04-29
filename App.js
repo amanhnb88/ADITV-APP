@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { 
   View, Text, StyleSheet, Platform, TouchableOpacity, 
   ActivityIndicator, TextInput, Alert 
@@ -15,18 +15,18 @@ import NetInfo from '@react-native-community/netinfo';
 import Fuse from 'fuse.js';
 
 // ==========================================
-// 1. TEMA & KONFIGURASI (Dari Section 10)
+// 1. TEMA & KONFIGURASI
 // ==========================================
 const theme = {
   colors: {
     bg: '#0A0A0A', surface: '#141414', surface2: '#1A1A1A',
-    accent: '#E50914', text: '#FFFFFF', textMuted: '#999999',
-    border: '#2A2A2A', tvFocus: '#FFFFFF', warning: '#f59e0b'
+    accent: '#3b82f6', text: '#FFFFFF', textMuted: '#999999',
+    border: '#1e2d45', tvFocus: '#FFFFFF', warning: '#f59e0b'
   }
 };
 
 // ==========================================
-// 2. STORAGE SUPER CEPAT (MMKV) (Dari Section 5)
+// 2. STORAGE SUPER CEPAT (MMKV)
 // ==========================================
 const storage = new MMKV();
 const zustandStorage = {
@@ -39,7 +39,7 @@ const zustandStorage = {
 };
 
 // ==========================================
-// 3. GLOBAL STATE (Zustand + Immer) (Dari Section 1)
+// 3. GLOBAL STATE (Zustand)
 // ==========================================
 const useStore = create(
   persist(
@@ -58,7 +58,7 @@ const useStore = create(
 );
 
 // ==========================================
-// 4. UTILITIES (Deteksi TV & Jaringan) (Dari Section 9 & 8)
+// 4. UTILITIES (Deteksi TV & Jaringan)
 // ==========================================
 const useDeviceType = () => {
   const isTV = Platform.isTV;
@@ -75,7 +75,7 @@ const useNetwork = () => {
 };
 
 // ==========================================
-// 5. PARSER M3U EKSTRIM (Dari Section 3)
+// 5. PARSER M3U EKSTRIM (Chunking)
 // ==========================================
 const CHUNK_SIZE = 200;
 async function parseM3UChunked(raw) {
@@ -84,24 +84,20 @@ async function parseM3UChunked(raw) {
   
   for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
     const chunk = lines.slice(i, i + CHUNK_SIZE);
-    await new Promise(resolve => setTimeout(resolve, 0)); // Anti-Freeze UI
+    await new Promise(resolve => setTimeout(resolve, 0)); 
     
     let currentChannel = {};
     chunk.forEach(line => {
       if (line.startsWith('#EXTINF')) {
-        // Ekstrak Logo
         const logoMatch = line.match(/tvg-logo="([^"]+)"/);
         currentChannel.logo = logoMatch ? logoMatch[1] : null;
         
-        // Ekstrak Kategori/Grup
         const groupMatch = line.match(/group-title="([^"]+)"/);
         currentChannel.group = groupMatch ? groupMatch[1] : 'Lainnya';
         
-        // Ekstrak Nama
         const nameMatch = line.match(/,(.+)$/);
         currentChannel.name = nameMatch ? nameMatch[1].trim() : 'Unknown';
         
-        // Cek DRM ClearKey
         const drmMatch = line.match(/#KODIPROP:clearkey=([^:]+):(.+)/);
         if (drmMatch) currentChannel.drm = { type: 'clearkey', keyId: drmMatch[1], key: drmMatch[2] };
         
@@ -139,10 +135,11 @@ const ChannelCard = React.memo(({ item, onPress, isTV, isActive }) => {
       ]}
     >
       <Image 
-        source={item.logo ? { uri: item.logo } : require('./assets/icon.png')} // Fallback logo
+        // 👇 Di sinilah icon2.png digunakan sebagai fallback logo dalam aplikasi 👇
+        source={item.logo ? { uri: item.logo } : require('./assets/icon2.png')} 
         style={styles.channelLogo} 
         contentFit="contain"
-        cachePolicy="disk" // Disk Caching
+        cachePolicy="disk" 
       />
       <View style={styles.channelInfo}>
         <Text style={[styles.channelName, isActive && styles.textActive]} numberOfLines={1}>
@@ -154,9 +151,8 @@ const ChannelCard = React.memo(({ item, onPress, isTV, isActive }) => {
   );
 });
 
-// --- Dual Player Engine (Dari Section 6) ---
+// --- Dual Player Engine ---
 const DualPlayer = ({ channel }) => {
-  // Expo Video (Untuk stream biasa HLS/DASH/TS)
   const expoPlayer = useVideoPlayer(channel?.url || '', (p) => { p.loop = false; p.play(); });
 
   if (!channel) {
@@ -167,7 +163,6 @@ const DualPlayer = ({ channel }) => {
     );
   }
 
-  // Jika Channel memiliki DRM proteksi, gunakan react-native-video
   if (channel.drm) {
     return (
       <View style={styles.playerContainer}>
@@ -186,7 +181,6 @@ const DualPlayer = ({ channel }) => {
     );
   }
 
-  // Standar Player
   return (
     <View style={styles.playerContainer}>
       <VideoView style={styles.videoView} player={expoPlayer} allowsFullscreen allowsPictureInPicture />
@@ -203,13 +197,11 @@ export default function App() {
   const { isTV } = useDeviceType();
   const isOnline = useNetwork();
 
-  // Load Playlist Awal
   useEffect(() => {
     const fetchPlaylist = async () => {
-      if (channels.length > 0) return; // Load dari cache MMKV jika ada
+      if (channels.length > 0) return; 
       setLoading(true);
       try {
-        // Contoh URL publik (bisa kamu ganti)
         const response = await fetch('https://iptv-org.github.io/iptv/countries/id.m3u');
         const m3uString = await response.text();
         const parsed = await parseM3UChunked(m3uString);
@@ -223,7 +215,6 @@ export default function App() {
     if (isOnline) fetchPlaylist();
   }, [isOnline]);
 
-  // Mesin Pencarian Cerdas (Fuse.js)
   const filteredChannels = useMemo(() => {
     if (!searchQuery) return channels;
     const fuse = new Fuse(channels, { keys: ['name', 'group'], threshold: 0.3 });
@@ -234,7 +225,6 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         
-        {/* Header & Network Banner */}
         <View style={styles.header}>
           <Text style={styles.headerTitle}>ADITV PRO</Text>
           <Text style={styles.deviceInfo}>{isTV ? 'TV Mode 📺' : 'Mobile Mode 📱'}</Text>
@@ -243,12 +233,10 @@ export default function App() {
 
         <View style={[styles.mainLayout, isTV && styles.tvLayout]}>
           
-          {/* Player Area */}
           <View style={isTV ? styles.tvPlayerWrapper : styles.mobilePlayerWrapper}>
             <DualPlayer channel={activeChannel} />
           </View>
 
-          {/* List & Search Area */}
           <View style={styles.listContainer}>
             {!isTV && (
               <TextInput
@@ -284,7 +272,7 @@ export default function App() {
 }
 
 // ==========================================
-// 8. STYLESHEET LENGKAP
+// 8. STYLESHEET
 // ==========================================
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.bg },
