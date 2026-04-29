@@ -6,7 +6,6 @@ import {
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
-import { useVideoPlayer, VideoView } from 'expo-video';
 import Video from 'react-native-video';
 import { create } from 'zustand';
 import Fuse from 'fuse.js';
@@ -37,26 +36,26 @@ const useLogStore = create((set) => ({
 }));
 
 // ==========================================
-// 2. SUPER PARSER M3U (Pintar baca pipe & topeng UA)
+// 2. PARSER M3U DEWA (Fix RCTI & Ribuan Channel)
 // ==========================================
 const CHUNK_SIZE = 200;
-// Topeng standar agar server tidak memutus siaran 5 detik
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 async function parseM3USuper(raw) {
   const { addLog } = useLogStore.getState();
-  addLog(`Memulai parsing ${raw.length} karakter...`, 'INFO');
+  addLog(`Memulai Ekstraksi ${raw.length} karakter...`, 'INFO');
   
   const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const results = [];
   
-  let currentChannel = {};
+  let currentChannel = null;
   let currentHeaders = {};
   let currentDrm = null;
+  let lastHeader = null;
 
   for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
     const chunk = lines.slice(i, i + CHUNK_SIZE);
-    await new Promise(resolve => setTimeout(resolve, 0)); // Anti-Freeze
+    await new Promise(resolve => setTimeout(resolve, 0)); // Anti-Ngelag
 
     chunk.forEach(line => {
       try {
@@ -66,11 +65,14 @@ async function parseM3USuper(raw) {
           const groupMatch = line.match(/group-title="([^"]+)"/);
           
           currentChannel = {
-            id: Math.random().toString(36).substring(7),
             name: nameMatch ? nameMatch[1].trim() : 'Unknown Channel',
             logo: logoMatch ? logoMatch[1] : null,
             group: groupMatch ? groupMatch[1] : 'Lainnya',
+            linkCount: 0 // Menghitung jika ada link cadangan
           };
+          currentHeaders = {};
+          currentDrm = null;
+          lastHeader = null;
         } 
         else if (line.startsWith('#KODIPROP:clearkey=')) {
           const val = line.substring(line.indexOf('=') + 1);
@@ -78,80 +80,75 @@ async function parseM3USuper(raw) {
           if (firstColon > -1) {
             currentDrm = { type: 'clearkey', clearKeys: { [val.substring(0, firstColon)]: val.substring(firstColon + 1) } };
           }
+          lastHeader = null;
         } 
         else if (line.startsWith('#KODIPROP:inputstream.adaptive.license_key=')) {
           currentDrm = { type: 'widevine', licenseServer: line.substring(line.indexOf('=') + 1) };
+          lastHeader = null;
         } 
         else if (line.startsWith('#EXTVLCOPT:http-user-agent=')) {
           currentHeaders['User-Agent'] = line.substring(line.indexOf('=') + 1);
+          lastHeader = 'User-Agent';
         } 
         else if (line.startsWith('#EXTVLCOPT:http-referrer=')) {
           currentHeaders['Referer'] = line.substring(line.indexOf('=') + 1);
+          lastHeader = null;
         } 
-        // BACA SEMUA URL (Tidak cuma http, tapi rtmp, dan abaikan tag #)
-        else if (!line.startsWith('#') && line.length > 5) {
+        // FIX: Menyambung baris Header yang terpotong (Kasus RCTI)
+        else if (!line.startsWith('#') && !line.match(/^(http|rtmp)/i) && lastHeader) {
+          currentHeaders[lastHeader] += ' ' + line;
+        }
+        // FIX: Membaca URL (Http, Rtmp, Pipe) & Memunculkan Link Cadangan
+        else if (line.match(/^(http|rtmp)/i)) {
           let url = line;
 
-          // Memisahkan URL dengan Header tersembunyi (Format: URL|User-Agent=xxx)
           if (url.includes('|')) {
             const parts = url.split('|');
             url = parts[0]; 
             const headerString = parts[1];
-            
             headerString.split('&').forEach(pair => {
               const eqIdx = pair.indexOf('=');
-              if (eqIdx > -1) {
-                currentHeaders[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
-              }
+              if (eqIdx > -1) currentHeaders[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
             });
           }
 
-          // Pasang topeng User-Agent jika playlist tidak menyediakannya
           if (!currentHeaders['User-Agent']) {
             currentHeaders['User-Agent'] = DEFAULT_USER_AGENT;
           }
 
-          currentChannel.url = url;
-          currentChannel.headers = { ...currentHeaders };
-          if (currentDrm) currentChannel.drm = currentDrm;
+          if (currentChannel && currentChannel.name) {
+            currentChannel.linkCount += 1;
+            let displayName = currentChannel.name;
+            if (currentChannel.linkCount > 1) {
+              displayName = `${currentChannel.name} (Link ${currentChannel.linkCount})`;
+            }
 
-          if (currentChannel.name && currentChannel.url) {
-            results.push({ ...currentChannel });
+            results.push({ 
+              ...currentChannel,
+              name: displayName,
+              id: Math.random().toString(36).substring(7),
+              url: url,
+              headers: { ...currentHeaders },
+              drm: currentDrm 
+            });
           }
-          
-          // Reset variabel untuk channel berikutnya
-          currentChannel = {};
-          currentHeaders = {};
-          currentDrm = null;
+          lastHeader = null;
+          // currentChannel tidak direset agar Link ke-2 RCTI dkk terbaca
         }
-      } catch (err) {
-        // Abaikan baris yang cacat agar tidak merusak baris lain
-      }
+      } catch (err) {}
     });
   }
   
-  addLog(`Parsing sukses! Ditemukan ${results.length} channel VIP.`, 'SUCCESS');
+  addLog(`Parsing sukses! Ditemukan ${results.length} Channel + Cadangan.`, 'SUCCESS');
   return results;
 }
 
 // ==========================================
-// 3. MESIN DUAL PLAYER
+// 3. MESIN PLAYER ANTI-BUFFERING
 // ==========================================
-const DualPlayer = ({ channel }) => {
+const MainPlayer = ({ channel }) => {
   const { addLog } = useLogStore();
   
-  const videoSource = channel?.url 
-    ? { uri: channel.url, headers: channel.headers } 
-    : null;
-
-  const player = useVideoPlayer(videoSource, (p) => {
-    p.loop = false;
-    if (channel?.url) {
-      addLog(`Play: ${channel.name} | UA: ${channel.headers['User-Agent'].substring(0,20)}...`, 'PLAYER');
-      p.play();
-    }
-  });
-
   if (!channel) {
     return (
       <View style={styles.placeholder}>
@@ -160,24 +157,34 @@ const DualPlayer = ({ channel }) => {
     );
   }
 
-  if (channel.drm) {
-    addLog(`Memutar DRM: ${channel.name}`, 'PLAYER');
-    return (
-      <View style={styles.videoWrapper}>
-        <Video 
-          source={videoSource} 
-          style={styles.video} 
-          controls={true} 
-          resizeMode="contain"
-          drm={channel.drm}
-          onError={(e) => addLog(`DRM Error: ${JSON.stringify(e)}`, 'ERROR')}
-        />
-        <Text style={styles.drmBadge}>🔒 DRM SECURED</Text>
-      </View>
-    );
-  }
+  const videoSource = channel.url 
+    ? { uri: channel.url, headers: channel.headers } 
+    : null;
 
-  return <VideoView style={styles.video} player={player} allowsFullscreen />;
+  return (
+    <View style={styles.videoWrapper}>
+      <Video 
+        source={videoSource} 
+        style={styles.video} 
+        controls={true} // Bawaan ExoPlayer: Memiliki Gear Kualitas & Subtitle
+        resizeMode="contain"
+        drm={channel.drm}
+        // INJEKSI ANTI-BUFFERING
+        bufferConfig={{
+          minBufferMs: 15000, // Minimal buffer 15 detik
+          maxBufferMs: 50000, // Maksimal simpan cache 50 detik
+          bufferForPlaybackMs: 2500, // Putar setelah dapet 2.5 detik
+          bufferForPlaybackAfterRebufferMs: 5000, // Kalau macet, tunggu 5 detik baru jalan lagi
+        }}
+        onLoad={() => addLog(`Memutar: ${channel.name}`, 'PLAYER')}
+        onError={(e) => addLog(`Error: ${JSON.stringify(e)}`, 'ERROR')}
+        onBuffer={({ isBuffering }) => {
+          if (isBuffering) addLog(`Sedang Buffering...`, 'WARN');
+        }}
+      />
+      {channel.drm && <Text style={styles.drmBadge}>🔒 DRM</Text>}
+    </View>
+  );
 };
 
 // ==========================================
@@ -254,7 +261,7 @@ export default function App() {
         </View>
 
         <View style={styles.playerSection}>
-          <DualPlayer channel={activeChannel} />
+          <MainPlayer channel={activeChannel} />
         </View>
 
         <View style={styles.listSection}>
