@@ -36,7 +36,7 @@ const useLogStore = create((set) => ({
 }));
 
 // ==========================================
-// 2. PARSER M3U DEWA (Fix RCTI & Ribuan Channel)
+// 2. PARSER M3U DEWA (Fix RCTI Kodi Headers)
 // ==========================================
 const CHUNK_SIZE = 200;
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -51,7 +51,6 @@ async function parseM3USuper(raw) {
   let currentChannel = null;
   let currentHeaders = {};
   let currentDrm = null;
-  let lastHeader = null;
 
   for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
     const chunk = lines.slice(i, i + CHUNK_SIZE);
@@ -68,37 +67,34 @@ async function parseM3USuper(raw) {
             name: nameMatch ? nameMatch[1].trim() : 'Unknown Channel',
             logo: logoMatch ? logoMatch[1] : null,
             group: groupMatch ? groupMatch[1] : 'Lainnya',
-            linkCount: 0 // Menghitung jika ada link cadangan
+            linkCount: 0 
           };
           currentHeaders = {};
           currentDrm = null;
-          lastHeader = null;
         } 
         else if (line.startsWith('#KODIPROP:clearkey=')) {
           const val = line.substring(line.indexOf('=') + 1);
           const firstColon = val.indexOf(':');
-          if (firstColon > -1) {
-            currentDrm = { type: 'clearkey', clearKeys: { [val.substring(0, firstColon)]: val.substring(firstColon + 1) } };
-          }
-          lastHeader = null;
+          if (firstColon > -1) currentDrm = { type: 'clearkey', clearKeys: { [val.substring(0, firstColon)]: val.substring(firstColon + 1) } };
         } 
         else if (line.startsWith('#KODIPROP:inputstream.adaptive.license_key=')) {
           currentDrm = { type: 'widevine', licenseServer: line.substring(line.indexOf('=') + 1) };
-          lastHeader = null;
         } 
+        // FIX: MEMBACA KODI STREAM HEADERS (Banyak dipakai di playlist VIP)
+        else if (line.startsWith('#KODIPROP:inputstream.adaptive.stream_headers=')) {
+          const headerStr = line.substring(line.indexOf('=') + 1);
+          headerStr.split('&').forEach(pair => {
+            const eqIdx = pair.indexOf('=');
+            if (eqIdx > -1) currentHeaders[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
+          });
+        }
         else if (line.startsWith('#EXTVLCOPT:http-user-agent=')) {
           currentHeaders['User-Agent'] = line.substring(line.indexOf('=') + 1);
-          lastHeader = 'User-Agent';
         } 
         else if (line.startsWith('#EXTVLCOPT:http-referrer=')) {
           currentHeaders['Referer'] = line.substring(line.indexOf('=') + 1);
-          lastHeader = null;
         } 
-        // FIX: Menyambung baris Header yang terpotong (Kasus RCTI)
-        else if (!line.startsWith('#') && !line.match(/^(http|rtmp)/i) && lastHeader) {
-          currentHeaders[lastHeader] += ' ' + line;
-        }
-        // FIX: Membaca URL (Http, Rtmp, Pipe) & Memunculkan Link Cadangan
+        // MEMBACA URL & PIPE HEADERS
         else if (line.match(/^(http|rtmp)/i)) {
           let url = line;
 
@@ -132,8 +128,6 @@ async function parseM3USuper(raw) {
               drm: currentDrm 
             });
           }
-          lastHeader = null;
-          // currentChannel tidak direset agar Link ke-2 RCTI dkk terbaca
         }
       } catch (err) {}
     });
@@ -166,20 +160,23 @@ const MainPlayer = ({ channel }) => {
       <Video 
         source={videoSource} 
         style={styles.video} 
-        controls={true} // Bawaan ExoPlayer: Memiliki Gear Kualitas & Subtitle
+        controls={true} // Bawaan sistem untuk memunculkan setting Kualitas & Subtitle
         resizeMode="contain"
         drm={channel.drm}
-        // INJEKSI ANTI-BUFFERING
+        autoplay={true} // Memaksa langsung play agar tombol play besar langsung hilang
+        
+        // INJEKSI ANTI-BUFFERING LEVEL TINGGI
         bufferConfig={{
-          minBufferMs: 15000, // Minimal buffer 15 detik
-          maxBufferMs: 50000, // Maksimal simpan cache 50 detik
-          bufferForPlaybackMs: 2500, // Putar setelah dapet 2.5 detik
-          bufferForPlaybackAfterRebufferMs: 5000, // Kalau macet, tunggu 5 detik baru jalan lagi
+          minBufferMs: 15000, // Kumpulkan 15 detik video sebelum mulai play
+          maxBufferMs: 50000, // Tampung hingga 50 detik ke depan di memori HP
+          bufferForPlaybackMs: 3000, // Minimal harus ada 3 detik siap tayang
+          bufferForPlaybackAfterRebufferMs: 5000, // Kalau ngelag, kumpulkan 5 detik dulu baru play
         }}
-        onLoad={() => addLog(`Memutar: ${channel.name}`, 'PLAYER')}
-        onError={(e) => addLog(`Error: ${JSON.stringify(e)}`, 'ERROR')}
+        
+        onLoad={() => addLog(`Siarang Langsung: ${channel.name}`, 'PLAYER')}
+        onError={(e) => addLog(`Server Gagal: ${JSON.stringify(e)}`, 'ERROR')}
         onBuffer={({ isBuffering }) => {
-          if (isBuffering) addLog(`Sedang Buffering...`, 'WARN');
+          if (isBuffering) addLog(`Sedang mengisi buffer siaran...`, 'WARN');
         }}
       />
       {channel.drm && <Text style={styles.drmBadge}>🔒 DRM</Text>}
