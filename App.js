@@ -12,7 +12,7 @@ import { create } from 'zustand';
 import Fuse from 'fuse.js';
 
 // ==========================================
-// 1. STATE & LOGGER (Logcat Internal)
+// 1. STATE & LOGGER
 // ==========================================
 const useStore = create((set) => ({
   channels: [],
@@ -25,24 +25,25 @@ const useStore = create((set) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
 }));
 
-// State untuk sistem Logcat
 const useLogStore = create((set) => ({
   logs: [],
   addLog: (msg, type = 'INFO') => set((state) => {
     const time = new Date().toLocaleTimeString();
     const newLog = `[${time}] [${type}] ${msg}`;
-    console.log(newLog); // Tetap print ke terminal asli
+    console.log(newLog); 
     return { logs: [newLog, ...state.logs] };
   }),
   clearLogs: () => set({ logs: [] })
 }));
 
 // ==========================================
-// 2. PARSER M3U EKSTRIM (Chunked & Defensive)
+// 2. SUPER PARSER M3U (Pintar baca pipe & topeng UA)
 // ==========================================
 const CHUNK_SIZE = 200;
+// Topeng standar agar server tidak memutus siaran 5 detik
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-async function parseM3UChunked(raw) {
+async function parseM3USuper(raw) {
   const { addLog } = useLogStore.getState();
   addLog(`Memulai parsing ${raw.length} karakter...`, 'INFO');
   
@@ -58,51 +59,83 @@ async function parseM3UChunked(raw) {
     await new Promise(resolve => setTimeout(resolve, 0)); // Anti-Freeze
 
     chunk.forEach(line => {
-      if (line.startsWith('#EXTINF')) {
-        const nameMatch = line.match(/,(.+)$/);
-        const logoMatch = line.match(/tvg-logo="([^"]+)"/);
-        const groupMatch = line.match(/group-title="([^"]+)"/);
-        
-        currentChannel = {
-          id: Math.random().toString(36).substring(7),
-          name: nameMatch ? nameMatch[1].trim() : 'Unknown Channel',
-          logo: logoMatch ? logoMatch[1] : null,
-          group: groupMatch ? groupMatch[1] : 'Lainnya',
-        };
-      } else if (line.startsWith('#KODIPROP:clearkey=')) {
-        const parts = line.split('=')[1]?.split(':');
-        if (parts && parts.length >= 2) {
-          currentDrm = { type: 'clearkey', clearKeys: { [parts[0]]: parts[1] } };
-        }
-      } else if (line.startsWith('#KODIPROP:inputstream.adaptive.license_key=')) {
-        currentDrm = { type: 'widevine', licenseServer: line.split('=')[1] };
-      } else if (line.startsWith('#EXTVLCOPT:http-user-agent=')) {
-        currentHeaders['User-Agent'] = line.split('=')[1];
-      } else if (line.startsWith('#EXTVLCOPT:http-referrer=')) {
-        currentHeaders['Referer'] = line.split('=')[1];
-      } else if (line.startsWith('http')) {
-        currentChannel.url = line;
-        
-        if (Object.keys(currentHeaders).length > 0) currentChannel.headers = currentHeaders;
-        if (currentDrm) currentChannel.drm = currentDrm;
+      try {
+        if (line.startsWith('#EXTINF')) {
+          const nameMatch = line.match(/,(.+)$/);
+          const logoMatch = line.match(/tvg-logo="([^"]+)"/);
+          const groupMatch = line.match(/group-title="([^"]+)"/);
+          
+          currentChannel = {
+            id: Math.random().toString(36).substring(7),
+            name: nameMatch ? nameMatch[1].trim() : 'Unknown Channel',
+            logo: logoMatch ? logoMatch[1] : null,
+            group: groupMatch ? groupMatch[1] : 'Lainnya',
+          };
+        } 
+        else if (line.startsWith('#KODIPROP:clearkey=')) {
+          const val = line.substring(line.indexOf('=') + 1);
+          const firstColon = val.indexOf(':');
+          if (firstColon > -1) {
+            currentDrm = { type: 'clearkey', clearKeys: { [val.substring(0, firstColon)]: val.substring(firstColon + 1) } };
+          }
+        } 
+        else if (line.startsWith('#KODIPROP:inputstream.adaptive.license_key=')) {
+          currentDrm = { type: 'widevine', licenseServer: line.substring(line.indexOf('=') + 1) };
+        } 
+        else if (line.startsWith('#EXTVLCOPT:http-user-agent=')) {
+          currentHeaders['User-Agent'] = line.substring(line.indexOf('=') + 1);
+        } 
+        else if (line.startsWith('#EXTVLCOPT:http-referrer=')) {
+          currentHeaders['Referer'] = line.substring(line.indexOf('=') + 1);
+        } 
+        // BACA SEMUA URL (Tidak cuma http, tapi rtmp, dan abaikan tag #)
+        else if (!line.startsWith('#') && line.length > 5) {
+          let url = line;
 
-        if (currentChannel.name) {
-          results.push({ ...currentChannel });
+          // Memisahkan URL dengan Header tersembunyi (Format: URL|User-Agent=xxx)
+          if (url.includes('|')) {
+            const parts = url.split('|');
+            url = parts[0]; 
+            const headerString = parts[1];
+            
+            headerString.split('&').forEach(pair => {
+              const eqIdx = pair.indexOf('=');
+              if (eqIdx > -1) {
+                currentHeaders[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
+              }
+            });
+          }
+
+          // Pasang topeng User-Agent jika playlist tidak menyediakannya
+          if (!currentHeaders['User-Agent']) {
+            currentHeaders['User-Agent'] = DEFAULT_USER_AGENT;
+          }
+
+          currentChannel.url = url;
+          currentChannel.headers = { ...currentHeaders };
+          if (currentDrm) currentChannel.drm = currentDrm;
+
+          if (currentChannel.name && currentChannel.url) {
+            results.push({ ...currentChannel });
+          }
+          
+          // Reset variabel untuk channel berikutnya
+          currentChannel = {};
+          currentHeaders = {};
+          currentDrm = null;
         }
-        
-        currentChannel = {};
-        currentHeaders = {};
-        currentDrm = null;
+      } catch (err) {
+        // Abaikan baris yang cacat agar tidak merusak baris lain
       }
     });
   }
   
-  addLog(`Parsing selesai! Ditemukan ${results.length} channel.`, 'SUCCESS');
+  addLog(`Parsing sukses! Ditemukan ${results.length} channel VIP.`, 'SUCCESS');
   return results;
 }
 
 // ==========================================
-// 3. MESIN DUAL PLAYER CERDAS
+// 3. MESIN DUAL PLAYER
 // ==========================================
 const DualPlayer = ({ channel }) => {
   const { addLog } = useLogStore();
@@ -114,7 +147,7 @@ const DualPlayer = ({ channel }) => {
   const player = useVideoPlayer(videoSource, (p) => {
     p.loop = false;
     if (channel?.url) {
-      addLog(`Menghubungkan ke: ${channel.name}...`, 'PLAYER');
+      addLog(`Play: ${channel.name} | UA: ${channel.headers['User-Agent'].substring(0,20)}...`, 'PLAYER');
       p.play();
     }
   });
@@ -128,7 +161,7 @@ const DualPlayer = ({ channel }) => {
   }
 
   if (channel.drm) {
-    addLog(`Memutar DRM (react-native-video): ${channel.name}`, 'PLAYER');
+    addLog(`Memutar DRM: ${channel.name}`, 'PLAYER');
     return (
       <View style={styles.videoWrapper}>
         <Video 
@@ -138,7 +171,6 @@ const DualPlayer = ({ channel }) => {
           resizeMode="contain"
           drm={channel.drm}
           onError={(e) => addLog(`DRM Error: ${JSON.stringify(e)}`, 'ERROR')}
-          onBuffer={({ isBuffering }) => isBuffering && addLog(`Buffering DRM: ${channel.name}`, 'WARN')}
         />
         <Text style={styles.drmBadge}>🔒 DRM SECURED</Text>
       </View>
@@ -149,19 +181,17 @@ const DualPlayer = ({ channel }) => {
 };
 
 // ==========================================
-// 4. LOGCAT PANEL COMPONENT
+// 4. LOGCAT PANEL
 // ==========================================
 const LogcatPanel = () => {
   const { logs, clearLogs } = useLogStore();
   const [isOpen, setIsOpen] = useState(false);
 
-  if (!isOpen) {
-    return (
-      <TouchableOpacity style={styles.fab} onPress={() => setIsOpen(true)}>
-        <Text style={styles.fabText}>🐛 LOG</Text>
-      </TouchableOpacity>
-    );
-  }
+  if (!isOpen) return (
+    <TouchableOpacity style={styles.fab} onPress={() => setIsOpen(true)}>
+      <Text style={styles.fabText}>🐛 LOG</Text>
+    </TouchableOpacity>
+  );
 
   return (
     <View style={styles.logcatContainer}>
@@ -173,13 +203,7 @@ const LogcatPanel = () => {
         </View>
       </View>
       <ScrollView style={styles.logcatBody}>
-        <TextInput 
-          editable={false} 
-          selectable={true} 
-          multiline 
-          value={logs.join('\n\n')} 
-          style={styles.logText}
-        />
+        <TextInput editable={false} selectable={true} multiline value={logs.join('\n\n')} style={styles.logText}/>
       </ScrollView>
       <Text style={styles.hintText}>* Tekan tahan teks hijau di atas untuk Menyalin (Copy)</Text>
     </View>
@@ -199,14 +223,11 @@ export default function App() {
       setLoading(true);
       addLog('Mengunduh playlist VIP super...', 'NETWORK');
       try {
-        // Menggunakan raw github link untuk file playlist_super.m3u
         const res = await fetch('https://raw.githubusercontent.com/amanhnb88/AdiTV/main/streams/playlist_super.m3u');
-        
         if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
         const text = await res.text();
-        addLog(`File terunduh, ukuran: ${text.length} bytes`, 'NETWORK');
         
-        const parsedChannels = await parseM3UChunked(text);
+        const parsedChannels = await parseM3USuper(text);
         setChannels(parsedChannels);
       } catch (e) {
         addLog(`Gagal memuat playlist: ${e.message}`, 'ERROR');
@@ -239,11 +260,8 @@ export default function App() {
         <View style={styles.listSection}>
           {!isTV && (
             <TextInput 
-              style={styles.input} 
-              placeholder="Cari ribuan channel VIP..." 
-              placeholderTextColor="#555"
-              value={searchQuery}
-              onChangeText={setSearchQuery}
+              style={styles.input} placeholder="Cari ribuan channel VIP..." 
+              placeholderTextColor="#555" value={searchQuery} onChangeText={setSearchQuery}
             />
           )}
 
@@ -254,24 +272,15 @@ export default function App() {
             </View>
           ) : (
             <FlashList
-              data={filtered}
-              estimatedItemSize={75}
-              keyExtractor={(item) => item.id}
+              data={filtered} estimatedItemSize={75} keyExtractor={(item) => item.id}
               renderItem={({ item }) => (
                 <TouchableOpacity 
-                  activeOpacity={0.7}
-                  style={[styles.card, activeChannel?.id === item.id && styles.activeCard]}
+                  activeOpacity={0.7} style={[styles.card, activeChannel?.id === item.id && styles.activeCard]}
                   onPress={() => setActiveChannel(item)}
                 >
-                  <Image 
-                    source={item.logo ? { uri: item.logo } : require('./assets/icon2.png')} 
-                    style={styles.logo}
-                    cachePolicy="memory"
-                  />
+                  <Image source={item.logo ? { uri: item.logo } : require('./assets/icon2.png')} style={styles.logo} cachePolicy="memory" />
                   <View style={styles.info}>
-                    <Text style={[styles.channelName, activeChannel?.id === item.id && styles.textAccent]} numberOfLines={1}>
-                      {item.name}
-                    </Text>
+                    <Text style={[styles.channelName, activeChannel?.id === item.id && styles.textAccent]} numberOfLines={1}>{item.name}</Text>
                     <Text style={styles.channelGroup}>{item.group}</Text>
                   </View>
                 </TouchableOpacity>
@@ -280,7 +289,6 @@ export default function App() {
           )}
         </View>
 
-        {/* Suntikkan Logcat Panel di atas segalanya */}
         {!isTV && <LogcatPanel />}
       </SafeAreaView>
     </SafeAreaProvider>
@@ -312,8 +320,6 @@ const styles = StyleSheet.create({
   channelGroup: { color: '#64748b', fontSize: 11, marginTop: 2 },
   textAccent: { color: '#3b82f6' },
   textMuted: { color: '#666' },
-  
-  // Logcat Styles
   fab: { position: 'absolute', bottom: 20, right: 20, backgroundColor: '#f59e0b', padding: 12, borderRadius: 30, elevation: 5, zIndex: 999 },
   fabText: { color: '#000', fontWeight: 'bold', fontSize: 12 },
   logcatContainer: { position: 'absolute', top: 50, left: 10, right: 10, bottom: 50, backgroundColor: 'rgba(10, 10, 10, 0.95)', borderRadius: 10, borderWidth: 1, borderColor: '#3b82f6', zIndex: 1000, padding: 10 },
