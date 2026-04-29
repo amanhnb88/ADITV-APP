@@ -6,11 +6,13 @@ import {
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 import { FlashList } from '@shopify/flash-list';
 import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import Video from 'react-native-video';
 import { create } from 'zustand';
 import Fuse from 'fuse.js';
 
 // ==========================================
-// 1. STATE SEDERHANA (TANPA MMKV DULU)
+// 1. STATE SEDERHANA (TANPA MMKV)
 // ==========================================
 const useStore = create((set) => ({
   channels: [],
@@ -55,7 +57,41 @@ async function parseM3U(raw) {
 }
 
 // ==========================================
-// 3. MAIN LAYOUT
+// 3. DUAL PLAYER MESIN
+// ==========================================
+const DualPlayer = ({ channel }) => {
+  // Player utama (expo-video)
+  const player = useVideoPlayer(channel?.url || null, (p) => {
+    p.loop = false;
+    if (channel?.url) p.play();
+  });
+
+  if (!channel) {
+    return (
+      <View style={styles.placeholder}>
+        <Text style={styles.textMuted}>Pilih channel untuk menonton 📺</Text>
+      </View>
+    );
+  }
+
+  // Jika URL butuh proteksi DRM (ClearKey/Widevine)
+  if (channel.url.includes('clearkey') || channel.url.includes('widevine')) {
+    return (
+      <Video 
+        source={{ uri: channel.url }} 
+        style={styles.video} 
+        controls={true} 
+        resizeMode="contain"
+      />
+    );
+  }
+
+  // Player Standar
+  return <VideoView style={styles.video} player={player} allowsFullscreen />;
+};
+
+// ==========================================
+// 4. MAIN LAYOUT
 // ==========================================
 export default function App() {
   const { channels, activeChannel, isLoading, searchQuery, setChannels, setActiveChannel, setLoading, setSearchQuery } = useStore();
@@ -91,11 +127,9 @@ export default function App() {
           <Text style={styles.title}>ADITV PRO</Text>
         </View>
 
-        {/* PEMUTAR VIDEO PALSU (DUMMY) */}
+        {/* MEMANGGIL MESIN PLAYER */}
         <View style={styles.playerSection}>
-          <Text style={{ color: '#10b981', fontSize: 18, fontWeight: 'bold' }}>
-            {activeChannel ? `Mencoba Memutar:\n${activeChannel.name}` : 'AREA PLAYER AMAN 🛡️'}
-          </Text>
+          <DualPlayer channel={activeChannel} />
         </View>
 
         <View style={styles.listSection}>
@@ -146,7 +180,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
   header: { padding: 15, borderBottomWidth: 1, borderBottomColor: '#1e2d45' },
   title: { color: '#3b82f6', fontSize: 22, fontWeight: 'bold' },
-  playerSection: { height: 250, backgroundColor: '#050505', justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#10b981' },
+  playerSection: { height: 250, backgroundColor: '#050505', justifyContent: 'center', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1e2d45' },
+  video: { flex: 1, width: '100%', height: '100%' },
+  placeholder: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   listSection: { flex: 1, padding: 10 },
   input: { backgroundColor: '#111', color: '#fff', padding: 12, borderRadius: 8, marginBottom: 12, borderWidth: 1, borderColor: '#1e2d45' },
   card: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 8, backgroundColor: '#0d1321', borderRadius: 10 },
@@ -155,5 +191,6 @@ const styles = StyleSheet.create({
   info: { flex: 1 },
   channelName: { color: '#fff', fontSize: 15, fontWeight: '600' },
   channelGroup: { color: '#64748b', fontSize: 11, marginTop: 2 },
-  textAccent: { color: '#3b82f6' }
+  textAccent: { color: '#3b82f6' },
+  textMuted: { color: '#666' }
 });
