@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch: # Memungkinkan kamu menjalankan build secara manual dari web GitHub
+  workflow_dispatch:
 
 jobs:
   build:
@@ -27,20 +27,34 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      # Fitur tambahan: Menyimpan cache Gradle agar build selanjutnya instan
+      - name: 🐘 Setup Gradle Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
       - name: 📦 Install dependencies
         run: npm install
 
       - name: 🛠️ Generate Native Android Project (Prebuild)
         run: npx expo prebuild --platform android --clean
 
-      - name: 🚀 Build Release APK
+      # Di sinilah keajaiban dokumentasi React Native diterapkan!
+      # Menambahkan arsitektur tunggal (arm64-v8a) dan configuration-cache
+      - name: 🚀 Build Release APK (Optimized)
         run: |
           cd android
-          ./gradlew assembleRelease
+          ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --configuration-cache
 
       - name: 📤 Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ADITV-App-Release
+          name: ADITV-App-Release-Fast
           path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 7
+
