@@ -1,337 +1,169 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { 
-  View, Text, StyleSheet, Platform, TouchableOpacity, 
-  ActivityIndicator, TextInput, Alert, ScrollView
+  View, Text, StyleSheet, TouchableOpacity, 
+  ActivityIndicator, ScrollView, TextInput 
 } from 'react-native';
 import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
-import { FlashList } from '@shopify/flash-list';
-import { Image } from 'expo-image';
 import Video from 'react-native-video';
 import { create } from 'zustand';
-import Fuse from 'fuse.js';
 
 // ==========================================
-// 1. STATE & LOGGER
+// 1. DATA CHANNEL AKTIF (HASIL SCAN PYTHON)
 // ==========================================
-const useStore = create((set) => ({
-  channels: [],
-  activeChannel: null,
-  isLoading: false,
-  searchQuery: '',
-  setChannels: (channels) => set({ channels }),
-  setActiveChannel: (channel) => set({ activeChannel: channel }),
-  setLoading: (isLoading) => set({ isLoading }),
-  setSearchQuery: (query) => set({ searchQuery: query }),
-}));
+const ACTIVE_CHANNELS = [
+  {
+    id: 'hbo-vip',
+    name: 'HBO HD (VIP)',
+    url: 'https://cdnjkt913.transvision.co.id:1000/live/master/3/4028c6856b6088c3016b87d64b970b53/manifest.mpd',
+    headers: {
+      'User-Agent': 'Xstream XGO/1.22 (Linux;Android 9) ExoPlayerLib/2.10.5',
+    },
+    drm: {
+      type: 'widevine',
+      licenseServer: 'https://cubmu.devhik.workers.dev/license_cenc',
+    }
+  },
+  {
+    id: 'rcti-aktif',
+    name: 'RCTI (Server Aktif)',
+    url: 'https://rcti-cutv.rctiplus.id/rcti-sdi.m3u8',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': 'https://www.rctiplus.com/',
+    }
+  }
+];
 
+// ==========================================
+// 2. LOGGER & STATE
+// ==========================================
 const useLogStore = create((set) => ({
   logs: [],
-  addLog: (msg, type = 'INFO') => set((state) => {
-    const time = new Date().toLocaleTimeString();
-    const newLog = `[${time}] [${type}] ${msg}`;
-    console.log(newLog); 
-    return { logs: [newLog, ...state.logs] };
-  }),
+  addLog: (msg, type = 'INFO') => set((state) => ({
+    logs: [`[${new Date().toLocaleTimeString()}] [${type}] ${msg}`, ...state.logs]
+  })),
   clearLogs: () => set({ logs: [] })
 }));
 
 // ==========================================
-// 2. PARSER M3U DEWA (Fix RCTI Kodi Headers)
+// 3. CUSTOM UI PLAYER (NO BIG PLAY BUTTON)
 // ==========================================
-const CHUNK_SIZE = 200;
-const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-
-async function parseM3USuper(raw) {
-  const { addLog } = useLogStore.getState();
-  addLog(`Memulai Ekstraksi ${raw.length} karakter...`, 'INFO');
-  
-  const lines = raw.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const results = [];
-  
-  let currentChannel = null;
-  let currentHeaders = {};
-  let currentDrm = null;
-
-  for (let i = 0; i < lines.length; i += CHUNK_SIZE) {
-    const chunk = lines.slice(i, i + CHUNK_SIZE);
-    await new Promise(resolve => setTimeout(resolve, 0)); // Anti-Ngelag
-
-    chunk.forEach(line => {
-      try {
-        if (line.startsWith('#EXTINF')) {
-          const nameMatch = line.match(/,(.+)$/);
-          const logoMatch = line.match(/tvg-logo="([^"]+)"/);
-          const groupMatch = line.match(/group-title="([^"]+)"/);
-          
-          currentChannel = {
-            name: nameMatch ? nameMatch[1].trim() : 'Unknown Channel',
-            logo: logoMatch ? logoMatch[1] : null,
-            group: groupMatch ? groupMatch[1] : 'Lainnya',
-            linkCount: 0 
-          };
-          currentHeaders = {};
-          currentDrm = null;
-        } 
-        else if (line.startsWith('#KODIPROP:clearkey=')) {
-          const val = line.substring(line.indexOf('=') + 1);
-          const firstColon = val.indexOf(':');
-          if (firstColon > -1) currentDrm = { type: 'clearkey', clearKeys: { [val.substring(0, firstColon)]: val.substring(firstColon + 1) } };
-        } 
-        else if (line.startsWith('#KODIPROP:inputstream.adaptive.license_key=')) {
-          currentDrm = { type: 'widevine', licenseServer: line.substring(line.indexOf('=') + 1) };
-        } 
-        // FIX: MEMBACA KODI STREAM HEADERS (Banyak dipakai di playlist VIP)
-        else if (line.startsWith('#KODIPROP:inputstream.adaptive.stream_headers=')) {
-          const headerStr = line.substring(line.indexOf('=') + 1);
-          headerStr.split('&').forEach(pair => {
-            const eqIdx = pair.indexOf('=');
-            if (eqIdx > -1) currentHeaders[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
-          });
-        }
-        else if (line.startsWith('#EXTVLCOPT:http-user-agent=')) {
-          currentHeaders['User-Agent'] = line.substring(line.indexOf('=') + 1);
-        } 
-        else if (line.startsWith('#EXTVLCOPT:http-referrer=')) {
-          currentHeaders['Referer'] = line.substring(line.indexOf('=') + 1);
-        } 
-        // MEMBACA URL & PIPE HEADERS
-        else if (line.match(/^(http|rtmp)/i)) {
-          let url = line;
-
-          if (url.includes('|')) {
-            const parts = url.split('|');
-            url = parts[0]; 
-            const headerString = parts[1];
-            headerString.split('&').forEach(pair => {
-              const eqIdx = pair.indexOf('=');
-              if (eqIdx > -1) currentHeaders[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1);
-            });
-          }
-
-          if (!currentHeaders['User-Agent']) {
-            currentHeaders['User-Agent'] = DEFAULT_USER_AGENT;
-          }
-
-          if (currentChannel && currentChannel.name) {
-            currentChannel.linkCount += 1;
-            let displayName = currentChannel.name;
-            if (currentChannel.linkCount > 1) {
-              displayName = `${currentChannel.name} (Link ${currentChannel.linkCount})`;
-            }
-
-            results.push({ 
-              ...currentChannel,
-              name: displayName,
-              id: Math.random().toString(36).substring(7),
-              url: url,
-              headers: { ...currentHeaders },
-              drm: currentDrm 
-            });
-          }
-        }
-      } catch (err) {}
-    });
-  }
-  
-  addLog(`Parsing sukses! Ditemukan ${results.length} Channel + Cadangan.`, 'SUCCESS');
-  return results;
-}
-
-// ==========================================
-// 3. MESIN PLAYER ANTI-BUFFERING
-// ==========================================
-const MainPlayer = ({ channel }) => {
+const CustomPlayer = ({ channel }) => {
   const { addLog } = useLogStore();
-  
-  if (!channel) {
-    return (
-      <View style={styles.placeholder}>
-        <Text style={styles.textMuted}>Pilih channel untuk memutar 📺</Text>
-      </View>
-    );
-  }
+  const [isBuffering, setIsBuffering] = useState(true);
+  const [showUI, setShowUI] = useState(false);
 
-  const videoSource = channel.url 
-    ? { uri: channel.url, headers: channel.headers } 
-    : null;
+  if (!channel) return (
+    <View style={styles.placeholder}><Text style={styles.textMuted}>Pilih Channel VIP di Bawah 📺</Text></View>
+  );
+
+  const handleTouch = () => {
+    setShowUI(true);
+    setTimeout(() => setShowUI(false), 3000);
+  };
 
   return (
     <View style={styles.videoWrapper}>
       <Video 
-        source={videoSource} 
-        style={styles.video} 
-        controls={true} // Bawaan sistem untuk memunculkan setting Kualitas & Subtitle
+        source={{ uri: channel.url, headers: channel.headers }} 
+        style={styles.video}
+        controls={false} // HILANGKAN TOMBOL PLAY SISTEM
+        autoplay={true}
         resizeMode="contain"
-        drm={channel.drm}
-        autoplay={true} // Memaksa langsung play agar tombol play besar langsung hilang
-        
-        // INJEKSI ANTI-BUFFERING LEVEL TINGGI
-        bufferConfig={{
-          minBufferMs: 15000, // Kumpulkan 15 detik video sebelum mulai play
-          maxBufferMs: 50000, // Tampung hingga 50 detik ke depan di memori HP
-          bufferForPlaybackMs: 3000, // Minimal harus ada 3 detik siap tayang
-          bufferForPlaybackAfterRebufferMs: 5000, // Kalau ngelag, kumpulkan 5 detik dulu baru play
-        }}
-        
-        onLoad={() => addLog(`Siarang Langsung: ${channel.name}`, 'PLAYER')}
-        onError={(e) => addLog(`Server Gagal: ${JSON.stringify(e)}`, 'ERROR')}
-        onBuffer={({ isBuffering }) => {
-          if (isBuffering) addLog(`Sedang mengisi buffer siaran...`, 'WARN');
-        }}
+        drm={channel.drm ? { ...channel.drm, headers: channel.headers } : undefined}
+        bufferConfig={{ minBufferMs: 15000, maxBufferMs: 50000, bufferForPlaybackMs: 2500 }}
+        onLoad={() => { setIsBuffering(false); addLog(`Playing: ${channel.name}`, 'SUCCESS'); }}
+        onBuffer={({ isBuffering }) => setIsBuffering(isBuffering)}
+        onError={(e) => { setIsBuffering(false); addLog(`Error: ${JSON.stringify(e)}`, 'ERROR'); }}
       />
-      {channel.drm && <Text style={styles.drmBadge}>🔒 DRM</Text>}
+
+      {isBuffering && <View style={styles.loadingOverlay}><ActivityIndicator size="large" color="#3b82f6" /></View>}
+
+      <TouchableOpacity style={styles.touchArea} activeOpacity={1} onPress={handleTouch}>
+        {showUI && (
+          <View style={styles.topBar}>
+            <Text style={styles.liveBadge}>● LIVE</Text>
+            <Text style={styles.channelTitle}>{channel.name}</Text>
+            <TouchableOpacity style={styles.gearButton} onPress={() => alert("Settings Open")}>
+              <Text style={{fontSize: 18}}>⚙️</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </TouchableOpacity>
     </View>
   );
 };
 
 // ==========================================
-// 4. LOGCAT PANEL
-// ==========================================
-const LogcatPanel = () => {
-  const { logs, clearLogs } = useLogStore();
-  const [isOpen, setIsOpen] = useState(false);
-
-  if (!isOpen) return (
-    <TouchableOpacity style={styles.fab} onPress={() => setIsOpen(true)}>
-      <Text style={styles.fabText}>🐛 LOG</Text>
-    </TouchableOpacity>
-  );
-
-  return (
-    <View style={styles.logcatContainer}>
-      <View style={styles.logcatHeader}>
-        <Text style={styles.logcatTitle}>Terminal / Logcat</Text>
-        <View style={{ flexDirection: 'row', gap: 10 }}>
-          <TouchableOpacity onPress={clearLogs} style={styles.logBtn}><Text style={styles.logBtnText}>Bersihkan</Text></TouchableOpacity>
-          <TouchableOpacity onPress={() => setIsOpen(false)} style={[styles.logBtn, {backgroundColor: '#ef4444'}]}><Text style={styles.logBtnText}>Tutup</Text></TouchableOpacity>
-        </View>
-      </View>
-      <ScrollView style={styles.logcatBody}>
-        <TextInput editable={false} selectable={true} multiline value={logs.join('\n\n')} style={styles.logText}/>
-      </ScrollView>
-      <Text style={styles.hintText}>* Tekan tahan teks hijau di atas untuk Menyalin (Copy)</Text>
-    </View>
-  );
-};
-
-// ==========================================
-// 5. MAIN LAYOUT
+// 4. MAIN APP
 // ==========================================
 export default function App() {
-  const { channels, activeChannel, isLoading, searchQuery, setChannels, setActiveChannel, setLoading, setSearchQuery } = useStore();
-  const { addLog } = useLogStore();
-  const isTV = Platform.isTV;
-
-  useEffect(() => {
-    const loadPlaylist = async () => {
-      setLoading(true);
-      addLog('Mengunduh playlist VIP super...', 'NETWORK');
-      try {
-        const res = await fetch('https://raw.githubusercontent.com/amanhnb88/AdiTV/main/streams/playlist_super.m3u');
-        if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
-        const text = await res.text();
-        
-        const parsedChannels = await parseM3USuper(text);
-        setChannels(parsedChannels);
-      } catch (e) {
-        addLog(`Gagal memuat playlist: ${e.message}`, 'ERROR');
-        Alert.alert("Gagal Memuat Playlist", "Cek Logcat untuk detail error.");
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadPlaylist();
-  }, []);
-
-  const filtered = useMemo(() => {
-    if (!searchQuery) return channels;
-    const fuse = new Fuse(channels, { keys: ['name', 'group'], threshold: 0.3 });
-    return fuse.search(searchQuery).map(r => r.item);
-  }, [channels, searchQuery]);
+  const [activeChannel, setActiveChannel] = useState(null);
+  const { logs, clearLogs } = useLogStore();
 
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <Text style={styles.title}>ADITV PRO</Text>
-          <Text style={styles.countInfo}>{channels.length} Saluran</Text>
-        </View>
+        <View style={styles.header}><Text style={styles.title}>ADITV PRO VIP</Text></View>
 
         <View style={styles.playerSection}>
-          <MainPlayer channel={activeChannel} />
+          <CustomPlayer channel={activeChannel} />
         </View>
 
         <View style={styles.listSection}>
-          {!isTV && (
-            <TextInput 
-              style={styles.input} placeholder="Cari ribuan channel VIP..." 
-              placeholderTextColor="#555" value={searchQuery} onChangeText={setSearchQuery}
-            />
-          )}
-
-          {isLoading ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#3b82f6" />
-              <Text style={styles.loadingText}>Menyiapkan Playlist Super...</Text>
-            </View>
-          ) : (
-            <FlashList
-              data={filtered} estimatedItemSize={75} keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <TouchableOpacity 
-                  activeOpacity={0.7} style={[styles.card, activeChannel?.id === item.id && styles.activeCard]}
-                  onPress={() => setActiveChannel(item)}
-                >
-                  <Image source={item.logo ? { uri: item.logo } : require('./assets/icon2.png')} style={styles.logo} cachePolicy="memory" />
-                  <View style={styles.info}>
-                    <Text style={[styles.channelName, activeChannel?.id === item.id && styles.textAccent]} numberOfLines={1}>{item.name}</Text>
-                    <Text style={styles.channelGroup}>{item.group}</Text>
-                  </View>
-                </TouchableOpacity>
-              )}
-            />
-          )}
+          <Text style={styles.sectionTitle}>Saluran Aktif Terverifikasi:</Text>
+          {ACTIVE_CHANNELS.map((ch) => (
+            <TouchableOpacity 
+              key={ch.id} 
+              style={[styles.card, activeChannel?.id === ch.id && styles.activeCard]}
+              onPress={() => setActiveChannel(ch)}
+            >
+              <View style={styles.dot} />
+              <Text style={styles.channelName}>{ch.name}</Text>
+              {ch.drm && <Text style={styles.drmTag}>DRM</Text>}
+            </TouchableOpacity>
+          ))}
         </View>
 
-        {!isTV && <LogcatPanel />}
+        {/* LOGCAT MINI */}
+        <View style={styles.logcatMini}>
+          <View style={styles.logHeader}>
+            <Text style={styles.logTitle}>System Logs</Text>
+            <TouchableOpacity onPress={clearLogs}><Text style={{color: '#ef4444', fontSize: 10}}>CLEAR</Text></TouchableOpacity>
+          </View>
+          <ScrollView style={{flex: 1}} nestedScrollEnabled>
+            <Text style={styles.logText}>{logs.join('\n')}</Text>
+          </ScrollView>
+        </View>
       </SafeAreaView>
     </SafeAreaProvider>
   );
 }
 
-// ==========================================
-// 6. STYLES
-// ==========================================
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  header: { padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1e2d45' },
-  title: { color: '#3b82f6', fontSize: 22, fontWeight: 'bold' },
-  countInfo: { color: '#10b981', fontSize: 12, fontWeight: 'bold' },
-  playerSection: { height: 250, backgroundColor: '#050505', justifyContent: 'center', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1e2d45' },
-  videoWrapper: { flex: 1, width: '100%', position: 'relative' },
-  video: { flex: 1, width: '100%', height: '100%' },
-  drmBadge: { position: 'absolute', top: 10, left: 10, backgroundColor: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 'bold', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
+  container: { flex: 1, backgroundColor: '#050505' },
+  header: { padding: 15, borderBottomWidth: 1, borderBottomColor: '#1e2d45', alignItems: 'center' },
+  title: { color: '#3b82f6', fontSize: 20, fontWeight: 'bold', letterSpacing: 2 },
+  playerSection: { height: 250, backgroundColor: '#000' },
+  videoWrapper: { flex: 1, position: 'relative' },
+  video: { flex: 1, width: '100%' },
+  loadingOverlay: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  touchArea: { ...StyleSheet.absoluteFillObject },
+  topBar: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', padding: 10 },
+  liveBadge: { backgroundColor: '#ef4444', color: '#fff', fontSize: 10, fontWeight: 'bold', padding: 3, borderRadius: 3, marginRight: 10 },
+  channelTitle: { color: '#fff', fontSize: 14, flex: 1 },
+  gearButton: { padding: 5 },
+  listSection: { flex: 1, padding: 20 },
+  sectionTitle: { color: '#64748b', marginBottom: 15, fontSize: 12, fontWeight: 'bold' },
+  card: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#0d1321', padding: 15, borderRadius: 12, marginBottom: 10, borderWidth: 1, borderColor: '#1e2d45' },
+  activeCard: { borderColor: '#3b82f6', backgroundColor: '#111827' },
+  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#10b981', marginRight: 15 },
+  channelName: { color: '#fff', fontSize: 16, fontWeight: '500', flex: 1 },
+  drmTag: { color: '#f59e0b', fontSize: 10, fontWeight: 'bold', borderWidth: 1, borderColor: '#f59e0b', paddingHorizontal: 4, borderRadius: 3 },
+  logcatMini: { height: 120, backgroundColor: '#000', borderTopWidth: 1, borderTopColor: '#1e2d45', padding: 10 },
+  logHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 5 },
+  logTitle: { color: '#3b82f6', fontSize: 10, fontWeight: 'bold' },
+  logText: { color: '#10b981', fontSize: 9, fontFamily: 'monospace' },
   placeholder: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  listSection: { flex: 1, padding: 10 },
-  input: { backgroundColor: '#111', color: '#fff', padding: 12, borderRadius: 8, marginBottom: 12, borderWidth: 1, borderColor: '#1e2d45' },
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  loadingText: { color: '#3b82f6', marginTop: 10, fontSize: 14 },
-  card: { flexDirection: 'row', alignItems: 'center', padding: 12, marginBottom: 8, backgroundColor: '#0d1321', borderRadius: 10 },
-  activeCard: { borderColor: '#3b82f6', borderWidth: 1, backgroundColor: '#111827' },
-  logo: { width: 45, height: 45, marginRight: 15, borderRadius: 6, backgroundColor: '#000' },
-  info: { flex: 1 },
-  channelName: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  channelGroup: { color: '#64748b', fontSize: 11, marginTop: 2 },
-  textAccent: { color: '#3b82f6' },
-  textMuted: { color: '#666' },
-  fab: { position: 'absolute', bottom: 20, right: 20, backgroundColor: '#f59e0b', padding: 12, borderRadius: 30, elevation: 5, zIndex: 999 },
-  fabText: { color: '#000', fontWeight: 'bold', fontSize: 12 },
-  logcatContainer: { position: 'absolute', top: 50, left: 10, right: 10, bottom: 50, backgroundColor: 'rgba(10, 10, 10, 0.95)', borderRadius: 10, borderWidth: 1, borderColor: '#3b82f6', zIndex: 1000, padding: 10 },
-  logcatHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#333', paddingBottom: 10, marginBottom: 10 },
-  logcatTitle: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  logBtn: { backgroundColor: '#3b82f6', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  logBtnText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
-  logcatBody: { flex: 1 },
-  logText: { color: '#10b981', fontFamily: 'monospace', fontSize: 11 },
-  hintText: { color: '#666', fontSize: 10, marginTop: 10, fontStyle: 'italic', textAlign: 'center' }
+  textMuted: { color: '#444' }
 });
